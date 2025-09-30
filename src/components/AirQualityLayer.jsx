@@ -239,7 +239,7 @@ function AirQualityLayer({ parameter = "aqi" }) {
       {/* Instructions popup */}
       <Marker position={[51.1657, 10.4515]} icon={L.divIcon({
         html: `<div style="background: #007bff; color: white; padding: 8px 12px; border-radius: 4px; font-size: 12px; white-space: nowrap;">
-                Click to check air quality in a 10km radius
+                Click to check air quality in a 100km radius
               </div>`,
         className: "",
         iconSize: [250, 40],
