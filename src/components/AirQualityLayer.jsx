@@ -28,33 +28,53 @@ function calculateNewPosition(lat, lon, distanceKm, bearingDegrees) {
   };
 }
 
-// Generate grid of points within radius
-function generateGridPoints(centerLat, centerLon, radiusKm = 10, gridSize = 5) {
+// Generate points in a polar/circular pattern (concentric rings at specific angles)
+function generatePolarGridPoints(centerLat, centerLon, radiusKm = 10) {
   const points = [];
-  const step = (radiusKm * 2) / (gridSize - 1);
   
-  for (let i = 0; i < gridSize; i++) {
-    for (let j = 0; j < gridSize; j++) {
-      const offsetLat = (i - Math.floor(gridSize / 2)) * step;
-      const offsetLon = (j - Math.floor(gridSize / 2)) * step;
-      
-      // Calculate distance from center
-      const distance = Math.sqrt(offsetLat * offsetLat + offsetLon * offsetLon);
-      
-      // Only include points within the radius
-      if (distance <= radiusKm) {
-        const bearing = Math.atan2(offsetLon, offsetLat) * (180 / Math.PI);
-        const newPos = calculateNewPosition(centerLat, centerLon, distance, bearing);
-        points.push({
-          lat: newPos.lat,
-          lon: newPos.lon,
-          id: `${newPos.lat.toFixed(4)}-${newPos.lon.toFixed(4)}`
-        });
-      }
+  // Define concentric rings (distances from center)
+  const rings = [
+    radiusKm * 0.2,  // 20% of radius (inner ring)
+    radiusKm * 0.4,  // 40% of radius
+    radiusKm * 0.6,  // 60% of radius
+    radiusKm * 0.8,  // 80% of radius
+    radiusKm * 1.0   // 100% of radius (outer ring)
+  ];
+  
+  // Define angles (directions) - 8 main directions + 8 intermediate = 16 total
+  const numAngles = 16;
+  const angleStep = 360 / numAngles;
+  
+  // Add center point
+  points.push({
+    lat: centerLat,
+    lon: centerLon,
+    id: `center`,
+    distance: 0,
+    angle: null
+  });
+  
+  // Generate points in polar pattern
+  rings.forEach((distance, ringIndex) => {
+    for (let i = 0; i < numAngles; i++) {
+      const angle = i * angleStep;
+      const newPos = calculateNewPosition(centerLat, centerLon, distance, angle);
+      points.push({
+        lat: newPos.lat,
+        lon: newPos.lon,
+        id: `r${ringIndex}-a${angle}`,
+        distance: distance,
+        angle: angle
+      });
     }
-  }
+  });
   
   return points;
+}
+
+// Keep old function for backward compatibility but use new polar grid
+function generateGridPoints(centerLat, centerLon, radiusKm = 10) {
+  return generatePolarGridPoints(centerLat, centerLon, radiusKm);
 }
 
 // Removed makeIcon and getColorForParameter functions - no longer needed without individual markers
@@ -81,11 +101,23 @@ async function fetchAirQuality(lat, lon) {
 
 // Fetch air quality data for multiple points in an area
 async function fetchAreaAirQuality(centerLat, centerLon, radiusKm = 10) {
-  const gridPoints = generateGridPoints(centerLat, centerLon, radiusKm, 5);
+  const gridPoints = generateGridPoints(centerLat, centerLon, radiusKm);
   
-  // Fetch data for all points in parallel
+  // Fetch data for all points in parallel, preserving metadata
   const promises = gridPoints.map(point => 
     fetchAirQuality(point.lat, point.lon)
+      .then(result => {
+        if (result) {
+          // Preserve distance and angle metadata
+          return {
+            ...result,
+            distance: point.distance,
+            angle: point.angle,
+            id: point.id
+          };
+        }
+        return null;
+      })
       .catch(err => {
         console.warn(`Failed to fetch data for ${point.lat}, ${point.lon}:`, err);
         return null;
@@ -121,7 +153,7 @@ function AirQualityLayer({ parameter = "aqi" }) {
     
     try {
       // Fetch air quality data for the area (10km radius)
-      const areaData = await fetchAreaAirQuality(lat, lon, 10);
+      const areaData = await fetchAreaAirQuality(lat, lon, 20);
       setAreaDataPoints(areaData);
       
       // Calculate average value for the parameter
@@ -272,21 +304,100 @@ function AirQualityLayer({ parameter = "aqi" }) {
         </Marker>
       )}
 
-      {/* Show circular area overlay */}
+      {/* Show circular area overlay - main boundary circle */}
       {centerPoint && averageValue !== null && (
         <Circle
           center={[centerPoint.lat, centerPoint.lon]}
-          radius={10000} // 10km in meters
+          radius={20000} // 100km in meters
           pathOptions={{
             color: getCircleStyle().color,
-            fillColor: getCircleStyle().color,
-            fillOpacity: getCircleStyle().fillOpacity,
+            fillColor: "transparent", // Make main circle transparent
+            fillOpacity: 0,
             weight: 2,
           }}
         />
       )}
 
-      {/* Removed individual markers - only showing circular area */}
+      {/* Show individual data point circles with color variations in polar pattern */}
+      {areaDataPoints.map((dataPoint) => {
+        const aqi = dataPoint.airData?.list[0]?.main?.aqi;
+        const value = parameter === "aqi" 
+          ? aqi 
+          : dataPoint.airData?.list[0]?.components[parameter];
+        
+        // Get color for this specific data point
+        const pointColor = parameter === "aqi" 
+          ? (() => {
+              const aqiColors = {
+                1: "#00E400", 2: "#FFFF00", 3: "#FF7E00", 
+                4: "#FF0000", 5: "#8F3F97"
+              };
+              return aqiColors[aqi] || "#666";
+            })()
+          : getGradientColor(value, parameter);
+
+        // Get direction label
+        const getDirectionLabel = (angle) => {
+          if (angle === null) return "Center";
+          const directions = [
+            "North", "NNE", "NE", "ENE",
+            "East", "ESE", "SE", "SSE",
+            "South", "SSW", "SW", "WSW",
+            "West", "WNW", "NW", "NNW"
+          ];
+          const index = Math.round(angle / 22.5) % 16;
+          return directions[index];
+        };
+
+        // Adjust circle size based on distance from center (smaller for inner rings)
+        const circleRadius = dataPoint.distance === 0 ? 2000 : Math.max(3000, dataPoint.distance * 1000 * 0.3);
+
+        return (
+          <Circle
+            key={dataPoint.id}
+            center={[dataPoint.lat, dataPoint.lon]}
+            radius={circleRadius}
+            pathOptions={{
+              color: pointColor,
+              fillColor: pointColor,
+              fillOpacity: 0.5,
+              weight: 1,
+              opacity: 0.7,
+            }}
+          >
+            <Popup>
+              <strong>Air Quality Data Point</strong>
+              <br />
+              <strong>Direction:</strong> {getDirectionLabel(dataPoint.angle)}
+              <br />
+              <strong>Distance:</strong> {dataPoint.distance.toFixed(1)} km from center
+              <br />
+              <br />
+              {parameter === "aqi" ? (
+                <>
+                  <strong>AQI: {aqi}</strong>
+                  <br />
+                  <small>
+                    {aqi === 1 && "Good"}
+                    {aqi === 2 && "Fair"}
+                    {aqi === 3 && "Moderate"}
+                    {aqi === 4 && "Poor"}
+                    {aqi === 5 && "Very Poor"}
+                  </small>
+                </>
+              ) : (
+                <>
+                  <strong>{parameter.toUpperCase()}: {value?.toFixed(2)} μg/m³</strong>
+                </>
+              )}
+              <br />
+              <small>Lat: {dataPoint.lat.toFixed(4)}, Lon: {dataPoint.lon.toFixed(4)}</small>
+              <br />
+              <small>Last update: {new Date(dataPoint.airData.list[0].dt * 1000).toLocaleString()}</small>
+            </Popup>
+          </Circle>
+        );
+      })}
 
       {/* Show loading state */}
       {isLoadingArea && centerPoint && (
